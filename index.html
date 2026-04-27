@@ -11,7 +11,7 @@ body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #1a1a1a; 
 h1 { font-size: 24px; font-weight: 600; margin-bottom: 4px; }
 .sub { color: #666; font-size: 14px; margin-bottom: 1.5rem; }
 .card { background: white; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-.row { display: flex; gap: 8px; margin-bottom: 0; }
+.row { display: flex; gap: 8px; }
 input[type=text] { flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; outline: none; }
 input[type=text]:focus { border-color: #1D9E75; }
 button.primary { background: #1D9E75; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; white-space: nowrap; }
@@ -51,10 +51,9 @@ footer { text-align: center; font-size: 12px; color: #bbb; margin-top: 2rem; }
 <div class="container">
   <h1>IPTV Playlist Checker</h1>
   <p class="sub">Zkontroluje M3U playlist a vygeneruje vyčištěný soubor pouze s funkčními kanály.</p>
-
   <div class="card">
     <div class="row">
-      <input type="text" id="urlInput" placeholder="https://example.com/playlist.m3u" value="https://iptv-org.github.io/iptv/languages/aze.m3u" />
+      <input type="text" id="urlInput" placeholder="https://example.com/playlist.m3u" />
       <button class="primary" id="startBtn" onclick="startCheck()">Zkontrolovat</button>
     </div>
     <div class="stats">
@@ -68,7 +67,6 @@ footer { text-align: center; font-size: 12px; color: #bbb; margin-top: 2rem; }
     </div>
     <div class="msg" id="msgArea"></div>
   </div>
-
   <div class="card" id="resultsCard" style="display:none">
     <div class="filter-row">
       <label>Zobrazit:</label>
@@ -79,18 +77,19 @@ footer { text-align: center; font-size: 12px; color: #bbb; margin-top: 2rem; }
       </select>
     </div>
     <div class="channel-list" id="channelList"></div>
-    <button class="dl-btn" id="dlBtn" onclick="downloadClean()">⬇ Stáhnout vyčištěný playlist (.m3u)</button>
+    <button class="dl-btn" id="dlBtn" onclick="downloadClean()">Stáhnout vyčištěný playlist (.m3u)</button>
   </div>
-
-  <footer>IPTV Checker &mdash; petienek/iptv-checker</footer>
+  <footer>IPTV Checker — petienek/iptv-checker</footer>
 </div>
-
 <script>
-const PROXY = 'https://corsproxy.io/?url=';
+const PROXIES = [
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.org/?${encodeURIComponent(url)}`,
+];
 const TIMEOUT = 8000;
 const CONCURRENCY = 15;
-let channels = [], running = false;
-let m3uHeader = '#EXTM3U';
+let channels = [], running = false, m3uHeader = '#EXTM3U';
 
 function msg(text, type) {
   const el = document.getElementById('msgArea');
@@ -108,7 +107,7 @@ function parsem3u(text) {
       let j = i + 1;
       while (j < lines.length && !lines[j]) j++;
       if (j < lines.length && lines[j] && !lines[j].startsWith('#')) {
-        const name = extinf.includes(',') ? extinf.split(',').slice(1).join(',').trim() : 'Kanál';
+        const name = extinf.includes(',') ? extinf.split(',').slice(1).join(',').trim() : 'Kanal';
         const grpMatch = extinf.match(/group-title="([^"]*)"/);
         list.push({ extinf, url: lines[j], name, group: grpMatch ? grpMatch[1] : '', status: 'pending' });
         i = j;
@@ -118,6 +117,17 @@ function parsem3u(text) {
   return list;
 }
 
+async function fetchWithFallback(url) {
+  for (const proxyFn of PROXIES) {
+    try {
+      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(15000) });
+      const text = await res.text();
+      if (text.includes('#EXTM3U') || text.includes('#EXTINF')) return text;
+    } catch(e) {}
+  }
+  throw new Error('Nepodařilo se stáhnout playlist. Zkontroluj URL a zkus znovu.');
+}
+
 async function testStream(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
@@ -125,91 +135,68 @@ async function testStream(url) {
     await fetch(url, { mode: 'no-cors', signal: ctrl.signal });
     clearTimeout(timer);
     return true;
-  } catch {
-    clearTimeout(timer);
-    return false;
-  }
+  } catch { clearTimeout(timer); return false; }
 }
 
 async function startCheck() {
   if (running) return;
   const url = document.getElementById('urlInput').value.trim();
-  if (!url) { msg('Zadej URL playlistu.', 'error'); return; }
-  running = true;
-  channels = [];
+  if (!url || !url.startsWith('http')) { msg('Zadej platnou URL začínající http:// nebo https://', 'error'); return; }
+  running = true; channels = [];
   document.getElementById('startBtn').disabled = true;
   document.getElementById('resultsCard').style.display = 'none';
   document.getElementById('dlBtn').style.display = 'none';
-  document.getElementById('sTotal').textContent = '—';
-  document.getElementById('sOk').textContent = '—';
-  document.getElementById('sFail').textContent = '—';
+  ['sTotal','sOk','sFail'].forEach(id => document.getElementById(id).textContent = '—');
   msg('Stahuji playlist...');
-
   try {
-    const res = await fetch(PROXY + encodeURIComponent(url), { signal: AbortSignal.timeout(15000) });
-    const text = await res.text();
-    if (!text.includes('#EXTM3U') && !text.includes('#EXTINF')) throw new Error('Neplatný M3U formát');
-    channels = parsem3u(text);
+    channels = parsem3u(await fetchWithFallback(url));
   } catch(e) {
-    msg('Nepodařilo se stáhnout playlist: ' + e.message, 'error');
-    running = false;
-    document.getElementById('startBtn').disabled = false;
-    return;
+    msg(e.message, 'error');
+    running = false; document.getElementById('startBtn').disabled = false; return;
   }
-
   if (!channels.length) { msg('Playlist neobsahuje žádné kanály.', 'error'); running = false; document.getElementById('startBtn').disabled = false; return; }
-
   document.getElementById('sTotal').textContent = channels.length;
   document.getElementById('sOk').textContent = '0';
   document.getElementById('sFail').textContent = '0';
   document.getElementById('progressWrap').style.display = 'block';
   document.getElementById('resultsCard').style.display = 'block';
   document.getElementById('channelList').style.display = 'block';
-  msg('');
-  renderList();
-
+  msg(''); renderList();
   let done = 0, ok = 0, fail = 0;
-
   async function processChunk(items) {
     for (const ch of items) {
       ch.status = await testStream(ch.url) ? 'ok' : 'fail';
       done++; if (ch.status === 'ok') ok++; else fail++;
-      const pct = Math.round(done / channels.length * 100);
-      document.getElementById('progressBar').style.width = pct + '%';
-      document.getElementById('progressText').textContent = `Testováno ${done} / ${channels.length} kanálů...`;
+      document.getElementById('progressBar').style.width = Math.round(done/channels.length*100)+'%';
+      document.getElementById('progressText').textContent = `Testováno ${done} / ${channels.length} kanal...`;
       document.getElementById('sOk').textContent = ok;
       document.getElementById('sFail').textContent = fail;
       if (done % 5 === 0 || done === channels.length) renderList();
     }
   }
-
   const size = Math.ceil(channels.length / CONCURRENCY);
-  const chunks = Array.from({ length: CONCURRENCY }, (_, i) => channels.slice(i * size, (i + 1) * size)).filter(c => c.length);
+  const chunks = Array.from({length: CONCURRENCY}, (_, i) => channels.slice(i*size, (i+1)*size)).filter(c => c.length);
   await Promise.all(chunks.map(processChunk));
-
-  document.getElementById('progressText').textContent = `Hotovo! ${ok} funkčních, ${fail} nefunkčních.`;
+  document.getElementById('progressText').textContent = `Hotovo! ${ok} funkcnich, ${fail} nefunkcnich.`;
   document.getElementById('dlBtn').style.display = 'inline-block';
-  if (channels.length && fail / channels.length > 0.2)
-    msg(`Upozornění: více než 20 % kanálů (${fail}/${channels.length}) nefunguje.`, 'warn');
-  running = false;
-  document.getElementById('startBtn').disabled = false;
+  if (channels.length && fail/channels.length > 0.2) msg(`Upozorneni: vice nez 20% kanalu nefunguje.`, 'warn');
+  running = false; document.getElementById('startBtn').disabled = false;
 }
 
 function renderList() {
   const filter = document.getElementById('filterSel').value;
-  const filtered = channels.filter(ch => filter === 'all' || ch.status === filter);
-  document.getElementById('channelList').innerHTML = filtered.slice(0, 500).map(ch =>
-    `<div class="ch-item"><div class="dot ${ch.status}"></div><div class="ch-name" title="${ch.url}">${ch.name}</div><div class="ch-group">${ch.group}</div></div>`
-  ).join('');
+  document.getElementById('channelList').innerHTML = channels
+    .filter(ch => filter === 'all' || ch.status === filter).slice(0,500)
+    .map(ch => `<div class="ch-item"><div class="dot ${ch.status}"></div><div class="ch-name" title="${ch.url}">${ch.name}</div><div class="ch-group">${ch.group}</div></div>`)
+    .join('');
 }
 
 function downloadClean() {
   const lines = [m3uHeader];
   channels.filter(ch => ch.status === 'ok').forEach(ch => { lines.push(ch.extinf); lines.push(ch.url); });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'audio/x-mpegurl' }));
-  a.download = 'playlist_cleaned.m3u';
-  a.click();
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], {type: 'audio/x-mpegurl'}));
+  a.download = 'playlist_cleaned.m3u'; a.click();
 }
 </script>
 </body>
