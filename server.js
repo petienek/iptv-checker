@@ -3,51 +3,48 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-app.use(express.static('public')); // Zde bude tvůj web
+app.use(express.static('public'));
 
-// Endpoint pro analýzu playlistu
 app.get('/analyze', async (req, res) => {
     const m3uUrl = req.query.url;
     if (!m3uUrl) return res.status(400).send('Chybí URL');
 
     try {
-        const response = await axios.get(m3uUrl);
+        const response = await axios.get(m3uUrl, { timeout: 10000 });
         const lines = response.data.split('\n');
-        const tasks = [];
-        
         let currentInf = "";
-        let results = ["#EXTM3U"];
-
-        console.log("Startuji analýzu...");
+        let testPromises = [];
 
         for (let line of lines) {
             line = line.trim();
             if (line.startsWith("#EXTINF")) {
                 currentInf = line;
             } else if (line.startsWith("http")) {
-                const streamUrl = line;
-                const infCapture = currentInf;
+                const urlToTest = line;
+                const metadata = currentInf;
 
-                // Vytvoříme testovací úlohu pro každý stream
-                tasks.push(
-                    axios.head(streamUrl, { timeout: 3000 })
-                        .then(() => {
-                            return infCapture + "\n" + streamUrl;
-                        })
-                        .catch(() => null) // Pokud stream nejede, vrátí null
-                );
+                // Vytvoříme test pro každý stream
+                const test = axios.get(urlToTest, { 
+                    timeout: 4000, 
+                    headers: { 'User-Agent': 'VLC/3.0.18' },
+                    responseType: 'stream' 
+                })
+                .then(() => metadata + "\n" + urlToTest)
+                .catch(() => null);
+
+                testPromises.push(test);
             }
         }
 
-        // Počkáme na všechny testy (paralelně pro rychlost)
-        const checkedStreams = await Promise.all(tasks);
-        results.push(...checkedStreams.filter(s => s !== null));
+        const checkedResults = await Promise.all(testPromises);
+        const finalPlaylist = ["#EXTM3U", ...checkedResults.filter(item => item !== null)];
+        
+        res.setHeader('Content-Type', 'text/plain');
+        res.send(finalPlaylist.join('\n'));
 
-        res.send(results.join('\n'));
     } catch (error) {
-        res.status(500).send('Chyba při stahování nebo zpracování playlistu.');
+        res.status(500).send('Chyba: Nepodařilo se načíst M3U soubor.');
     }
 });
 
-app.listen(PORT, () => console.log(`Server běží na portu ${PORT}`));
+app.listen(PORT, () => console.log(`Server běží na ${PORT}`));
